@@ -1,24 +1,28 @@
 import os
 import re
 import json
+import logging
 import feedparser
 import requests
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-# 1. Configuración de Entorno e IA
+# Configuración del Logger para entornos de producción
+logger = logging.getLogger("trade_intelligence_cron")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
 
 if not api_key:
-    raise ValueError("❌ GEMINI_API_KEY no se encuentra en el archivo .env")
+    raise ValueError("❌ GEMINI_API_KEY no inicializada en las variables de entorno.")
 
 client = genai.Client(api_key=api_key)
 
-# Métricas de control de costos para Gemini 2.5 Flash
-PAID_PRICE_PER_INPUT_TOKEN = 0.075 / 1_000_000
-PAID_PRICE_PER_OUTPUT_TOKEN = 0.30 / 1_000_000
+# Métricas de auditoría económica (gemini-2.5-flash-lite)
+PRICE_PER_INPUT_TOKEN = 0.10 / 1_000_000
+PRICE_PER_OUTPUT_TOKEN = 0.40 / 1_000_000
 
 # Fuentes de Datos Estratégicas para Inteligencia en Comercio Exterior
 COLOMBIA_FEEDS = [
@@ -39,18 +43,17 @@ INTERNATIONAL_FEEDS = [
     "https://www.federalreserve.gov/feeds/press_all.xml"
 ]
 
-def fetch_rss_news(feed_urls, max_articles=15):
-    """Descarga vectores informativos inyectando encabezados corporativos para evitar bloqueos."""
+def _fetch_feed_layer(feed_urls, max_articles=8):
+    """Capa de extracción perimetral con control de desbordamiento de búfer de tokens."""
     compiled_articles = []
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/rss+xml, application/xml, text/xml, text/html;q=0.9, */*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8"
+        "Accept": "application/rss+xml, application/xml, text/xml, text/html;q=0.9, */*;q=0.8"
     }
 
     for url in feed_urls:
         try:
-            response = requests.get(url, headers=headers, timeout=12)
+            response = requests.get(url, headers=headers, timeout=8)
             if response.status_code != 200:
                 continue
                 
@@ -68,80 +71,77 @@ def fetch_rss_news(feed_urls, max_articles=15):
                 if article["snippet"]:
                     article["snippet"] = re.sub('<[^<]+?>', '', article["snippet"]).strip()
                     
-                # Filtro de duplicados por título analizado
                 if article["title"] and article["title"] not in [a["title"] for a in compiled_articles]:
                     compiled_articles.append(article)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Interrupción leve de lectura en origen {url}: {str(e)}")
             continue
             
     return compiled_articles
 
-def format_articles_for_llm(articles):
+def _build_token_payload(articles):
     text_block = ""
     for idx, art in enumerate(articles):
-        snippet = art['snippet'][:250] if art['snippet'] else "Sin descripción disponible en origen."
+        snippet = art['snippet'][:200] if art['snippet'] else "Sin metadatos descritos."
         text_block += f"[{idx}] TÍTULO: {art['title']}\nRESUMEN: {snippet}\nURL: {art['url']}\n\n"
     return text_block
 
-def generate_intelligence_report():
-    print("🛰️ Extrayendo Vectores Económicos de Colombia...")
-    co_articles = fetch_rss_news(COLOMBIA_FEEDS)
-    print(f"   -> {len(co_articles)} historias colombianas recuperadas.")
-    
-    print("🌍 Extrayendo Vectores Macroeconómicos Internacionales...")
-    global_articles = fetch_rss_news(INTERNATIONAL_FEEDS)
-    print(f"   -> {len(global_articles)} historias globales recuperadas.")
+def run_trade_pipeline():
+    """
+    Tubería de ejecución automatizada cada 12 horas. 
+    Retorna un diccionario limpio listo para serialización JSON HTTP.
+    """
+    co_articles = _fetch_feed_layer(COLOMBIA_FEEDS)
+    global_articles = _fetch_feed_layer(INTERNATIONAL_FEEDS)
     
     if not co_articles and not global_articles:
-        print("❌ Error Fatal: No se pudo recolectar información de ninguna fuente primaria.")
-        return None, None
+        logger.error("Extracción fallida: 0 artículos acumulados en el pool de feeds.")
+        return {"error": "No baseline news sources reached during this execution cycle."}
         
-    co_text = format_articles_for_llm(co_articles) if co_articles else "No hay datos locales disponibles."
-    global_text = format_articles_for_llm(global_articles) if global_articles else "No hay datos globales disponibles."
-    
-    print("🧠 Ejecutando Analizador de Comercio Exterior (Gemini 2.5 Flash)...")
+    co_text = _build_token_payload(co_articles) if co_articles else "No data."
+    global_text = _build_token_payload(global_articles) if global_articles else "No data."
     
     prompt = f"""
-    Actúa como el Analista Principal de Comercio Exterior y Estrategia de Cadena de Suministro para Mercatoria. 
-    Tu objetivo es destilar el flujo masivo de noticias crudas en tres productos de alta fidelidad: Briefing Diario, Noticias Clasificadas y Alertas de Comercio Exterior.
+    Actúa como el motor analítico de Comercio Exterior para Mercatoria.
+    Tu tarea es procesar las siguientes fuentes noticiosas y estructurarlas para una actualización que ocurre cada 12 horas.
 
-    --- ENTRADA DE DATOS: COLOMBIA ---
+    --- NOVEDADES: COLOMBIA ---
     {co_text}
     
-    --- ENTRADA DE DATOS: INTERNACIONAL ---
+    --- NOVEDADES: INTERNACIONAL ---
     {global_text}
     
-    INSTRUCCIONES DE DISEÑO Y FILTRADO:
-    1. BRIEFING DIARIO: Genera un análisis ejecutivo macro de alto nivel (un eje conceptual unificado). Debe incluir un título analítico potente, un resumen estratégico profundo, y tres desgloses tácticos en listas de objetos: 'puntos_clave', 'oportunidades' y 'riesgos'.
-    2. NOTICIAS: Extrae las noticias individuales con relevancia aduanera o comercial directa. Clasifícalas usando exactamente estos tags de categoría ('Mercados', 'Logística', 'Acuerdos', 'Regulación') y tags de impacto ('alta', 'media', 'baja').
-    3. ALERTAS: Detecta cambios críticos y urgentes (ej. incrementos de demanda en nichos específicos, nuevas regulaciones aduaneras de la FDA/DIAN, volatilidad de commodities). Clasifica su nivel en: 'crítica', 'importante', 'informativa'. Incluye un array de palabras clave útiles ('tags') como 'café', 'textiles', 'Estados Unidos'.
+    CRITERIOS DE FILTRADO Y RESTRICCIÓN:
+    1. BRIEFING DIARIO: Diseña un único título analítico para el ciclo actual de 12 horas y un análisis integrado enfocado en importaciones/exportaciones de Colombia. Genera listas estrictas de 3 elementos para 'puntos_clave', 'oportunidades' y 'riesgos'.
+    2. NOTICIAS CLASIFICADAS: Selecciona e integra un máximo estricto de hasta 10 noticias (combinando Colombia e Internacional) que tengan el impacto más alto en aduanas, logística o balanza de pagos. No devuelvas más de 10 elementos bajo ninguna circunstancia. Categorías válidas: 'Mercados', 'Logística', 'Acuerdos', 'Regulación'. Impactos válidos: 'alta', 'media', 'baja'.
+    3. ALERTAS COMERCIALES: Captura las regulaciones urgentes de la FDA, la DIAN, o alertas portuarias inmediatas. Prioridades: 'crítica', 'importante', 'informativa'.
+
+    Idioma requerido de respuesta: Español.
     
-    Idioma de respuesta corporativa: Español.
-    
-    Devuelve la respuesta estrictamente bajo el siguiente esquema JSON estructurado:
+    Responde exclusivamente bajo el siguiente esquema JSON:
     {{
       "briefing_diario": {{
-        "titulo_macro": "Título de impacto macroeconómico o geopolítico",
-        "analisis_ejecutivo": "Texto analítico integrado de 4-5 líneas evaluando el escenario para exportadores colombianos.",
-        "puntos_clave": ["Punto clave 1 con enfoque de comercio exterior", "Punto clave 2"],
-        "oportunidades": ["Oportunidad comercial táctica o de sustitución identificada", "Oportunidad 2"],
-        "riesgos": ["Riesgo regulatorio, logístico o cambiario detectado", "Riesgo 2"]
+        "titulo_macro": "",
+        "analisis_ejecutivo": "",
+        "puntos_clave": [],
+        "oportunidades": [],
+        "riesgos": []
       }},
       "noticias_clasificadas": [
         {{
-          "titulo": "Título de la noticia original o refinado profesionalmente",
-          "extracto": "Resumen contextualizado del impacto comercial de la noticia en 2 líneas.",
-          "categoria_tag": "Logística",
-          "impacto_tag": "alta",
-          "url": "url_origen"
+          "titulo": "",
+          "extracto": "",
+          "categoria_tag": "",
+          "impacto_tag": "",
+          "url": ""
         }}
       ],
       "alertas_comerciales": [
         {{
-          "alerta_titulo": "Ej: Nuevas regulaciones de trazabilidad para frutas en EE. UU.",
-          "descripcion": "Explicación breve de la ventana de acción o peligro aduanero.",
-          "prioridad": "crítica",
-          "tags": ["Regulación", "frutas", "Estados Unidos"]
+          "alerta_titulo": "",
+          "descripcion": "",
+          "prioridad": "",
+          "tags": []
         }}
       ]
     }}
@@ -149,38 +149,51 @@ def generate_intelligence_report():
     
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash", 
+            model="gemini-2.5-flash-lite",
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                temperature=0.2  # Temperatura baja para maximizar precisión en la clasificación de datos
+                temperature=0.1
             )
         )
-        return response.text, response
-    except Exception as e:
-        print(f"❌ Error en la capa de procesamiento del Modelo AI: {e}")
-        return None, None
-
-if __name__ == "__main__":
-    final_json, raw_response = generate_intelligence_report()
-    
-    if final_json and raw_response:
-        print("\n📦 --- JSON ESTRUCTURADO PARA FRONTEND ---")
-        print(final_json)
         
-        # Procesamiento de analíticas de ejecución
-        usage = raw_response.usage_metadata
+        payload_data = json.loads(response.text)
+        
+        # Auditoría de métricas y tracking de costos
+        usage = response.usage_metadata
         input_tokens = usage.prompt_token_count
         output_tokens = usage.candidates_token_count
         
-        costo_entrada = input_tokens * PAID_PRICE_PER_INPUT_TOKEN
-        costo_salida = output_tokens * PAID_PRICE_PER_OUTPUT_TOKEN
-        valor_ahorrado = costo_entrada + costo_salida
+        cost_input = input_tokens * PRICE_PER_INPUT_TOKEN
+        cost_output = output_tokens * PRICE_PER_OUTPUT_TOKEN
+        total_predicted_cost = cost_input + cost_output
         
-        print("\n📊 --- MÉTRICAS DE OPERACIÓN DEL AGENTE ---")
-        print(f"• Motor de Inferencia: gemini-2.5-flash")
-        print(f"• Volumen de Entrada (Tokens): {input_tokens}")
-        print(f"• Volumen de Salida (Tokens): {output_tokens}")
-        print(f"• Costo de Operación en Free Tier: $0.00 USD")
-        print(f"• Valor de Carga Equivalente Ahorrado: ${valor_ahorrado:.6f} USD")
-        print("-------------------------------------------------------")
+        payload_data["pipeline_metadata"] = {
+            "execution_model": "gemini-2.5-flash-lite",
+            "cycle_frequency": "12_hours_scheduled",
+            "metrics": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": usage.total_token_count
+            },
+            "predicted_costs_usd": {
+                "input": round(cost_input, 6),
+                "output": round(cost_output, 6),
+                "total_run": round(total_predicted_cost, 6)
+            }
+        }
+        
+        return payload_data
+
+    except json.JSONDecodeError:
+        logger.error("Falla de decodificación: La respuesta del modelo no conservó la sintaxis estructural.")
+        return {"error": "Malformed JSON structure generated by the underlying model."}
+    except Exception as e:
+        logger.error(f"Falla crítica del sistema: {str(e)}")
+        return {"error": f"Internal pipeline exception: {str(e)}"}
+
+if __name__ == "__main__":
+    # Invocación local directa para testing del payload estructurado
+    import pprint
+    result = run_trade_pipeline()
+    pprint.pprint(result)
